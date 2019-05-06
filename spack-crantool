@@ -1,0 +1,290 @@
+#!/bin/env python3
+# spack-crantool
+# auto-fills CRAN package boilerplates
+
+import argparse
+import hashlib
+import os
+import re
+import requests
+import shutil
+import subprocess
+import sys
+import textwrap
+
+from requests import HTTPError
+
+def gen_spack_boilerplate(package_data, use_imports=False, use_suggests=False):
+    """Generates the spack boilerpalte code for package data.
+       package_data should be retrieved using fetch_cran_data()."""
+
+    # before generating the boilerplate, download the tarball and checksum it
+    checksum = hashlib.sha256(requests.get(package_data['url']).content).hexdigest()
+
+    # just hope that the shortdesc doesn't exceed 80 characters.
+    # otherwise, flake8 checks will fail and you'll have to manually modify it
+
+    contents =  '# Copyright 2013-2019 Lawrence Livermore National Security, LLC and other\n'
+    contents += '# Spack Project Developers. See the top-level COPYRIGHT file for details.\n'
+    contents += '#\n'
+    contents += '# SPDX-License-Identifier: (Apache-2.0 OR MIT)\n'
+    contents += '\nfrom spack import *\n\n\n'
+    contents += 'class R%s(RPackage):\n' % package_data['name'].capitalize()
+
+    # generate pretty-formatted desc
+    desc_lines = textwrap.wrap(package_data['short_desc'],
+                               76,
+                               initial_indent = '"""',
+                               subsequent_indent='   ')
+
+    desc_lines[-1] += '"""'
+
+    for line in desc_lines:
+        contents += '    %s\n' % line
+
+    contents += '\n'
+
+    contents += '    homepage = "%s"\n' % package_data['homepage']
+    contents += '    url      = "%s"\n' % package_data['url']
+    contents += '    list_url = "%s"\n\n' % package_data['list_url']
+    contents += "    version('{0}', sha256='{1}')\n\n".format(package_data['version'], checksum)
+
+    def dep_line(depstr):
+        return "    depends_on('{0}', type=('build', 'run'))\n".format(depstr)
+
+    # inject r version constraint if needed
+    if package_data['min_r_version'] != None:
+        contents += dep_line('r@{0}:'.format(package_data['min_r_version']))
+
+    # inject dependencies
+    def inject_deps(deps):
+        lines = ''
+
+        for dep in deps:
+            dep_parts = dep.split('@')
+            dep_parts[0] = get_spack_name_for(dep_parts[0])
+            dep = '@'.join(dep_parts)
+            lines += dep_line(dep)
+
+        return lines
+
+    contents += inject_deps(package_data['depends'])
+
+    if use_imports:
+        contents += inject_deps(package_data['imports'])
+
+    if use_suggests:
+        contents += inject_deps(package_data['suggests'])
+
+    # find the local spack installation
+    pkg_root = '%s/../var/spack/repos/builtin/packages' % os.path.dirname(shutil.which('spack'))
+    pkg_dir = '{0}/{1}'.format(pkg_root, package_data['spack_name'])
+    pkg_file = '%s/package.py' % pkg_dir
+
+    print(contents)
+
+    os.mkdir(pkg_dir)
+
+    with open(pkg_file, 'w') as f:
+        f.write(contents)
+
+    print('wrote package file %s' % pkg_file)
+
+def build_spack_package_for(name, recursive=False, build_imports=True, build_suggests=False):
+    """Generates and saves a spack package recipe for an R package.
+       Will fail if dependencies for the package are not met.
+       If recursive is True, then this function will try and create
+       all of the dependencies for the package before building it.
+       
+       Checking that a sufficient version of a package exists in spack is
+       nontrivial, so this function just makes sure the package exists.
+       
+       If build_imports is True then this function will treat imports as dependencies.
+       (Likewise for suggests, off by default.)"""
+
+    print('Building spack package for %s' % name)
+    data = fetch_cran_data(name)
+
+    if get_spack_package_exists(data['spack_name']):
+        return
+
+    def build_deplist(deps):
+        for dep in deps:
+            dep_name = dep.split('@')[0]
+            dep_sname = get_spack_name_for(dep_name)
+            if not get_spack_package_exists(dep_sname):
+                if recursive:
+                    build_spack_package_for(dep_name, 
+                                            recursive=True,
+                                            build_imports=build_imports,
+                                            build_suggests=build_suggests)
+                else:
+                    raise RuntimeError('Dependency for {0} not in spack: {1} (for {2})'.format(name, dep_sname, dep_name))
+
+    build_deplist(data['depends'])
+
+    if build_imports:
+        build_deplist(data['imports'])
+    if build_suggests:
+        build_deplist(data['suggests'])
+
+    print('Built dependencies for %s' % name)
+    gen_spack_boilerplate(data, use_imports=build_imports, use_suggests=build_suggests)
+
+def get_spack_name_for(name):
+    """Converts an R package name to the spack equivalent."""
+    name = name.lower().replace('.', '-')
+
+    if not name.startswith('r-'):
+        name = 'r-%s' % name
+
+    return name
+
+def get_spack_package_exists(name):
+    """Returns true iff the exact package name <name> exists in spack.
+       Will throw an exception if the spack command fails."""
+
+    print('checking if spack package %s exists' % name)
+
+    output = subprocess.check_output(['spack', 'list', name]).decode(sys.stdout.encoding)
+    packages = output.split('\n')[:-1]
+    return name in packages
+
+def parse_cran_links(line):
+    """Parses links pointing to cran from a depends line, imports line, or
+       a suggests line."""
+
+    # can't do it with a simple regex because we need to match any version
+    # constraints as well. split it into a list of deps and perform the regex
+    # on each one.
+    deps = line.split(',')
+    output = []
+
+    for dep in deps:
+        dep_name = re.search('<a href="\.\./([^/]+)/index.html">', dep)
+
+        if dep_name == None:
+            continue
+
+        dep_string = dep_name.group(1)
+        dep_minver = re.search('\(&ge; (.+)\)$', dep)
+
+        if dep_minver != None:
+            dep_string += '@' + dep_minver.group(1) + ':'
+
+        output.append(dep_string)
+
+    return output
+
+def fetch_cran_data(name):
+    """Fetches R package data from CRAN. Throws an exception if the fetch fails.
+       Will try and fetch from 'https://cran.r-project.org/package=<name>'
+
+       If something goes wrong, this function may raise an HTTPError
+
+       Returned data structure is a dictionary with the following fields:
+           name          : R package name, same as argument passed
+           spack_name    : Spack package name
+           url           : tarball URL for latest version
+           version       : latest version string
+           homepage      : package homepage or default cran link
+           list_url      : archive URL
+           short_desc    : short description on top of page
+           long_desc     : long description at top of page
+           min_r_version : minimum required r version, or None
+           depends       : dependencies within CRAN that are not part of core R
+           imports       : import dependencies within CRAN
+           suggests      : suggested packages in CRAN
+
+       Note: this will ignore dependencies in bioconductor. if they are required then the
+             generated package will NOT be able to build."""
+
+    webpage_url = 'https://cran.r-project.org/package=%s' % name
+
+    print('fetching package data for {0} from {1} ..'.format(name, webpage_url))
+
+    # try and fetch the webpage
+    resp = requests.get(webpage_url)
+    resp.raise_for_status()
+
+    # grab the summary table for later parsing
+    # a little hacky, but grabs the correct output as of now
+    #summary_table = resp.text.split('</p>')[1].split('<h4>')[0]
+    #print(summary_table)
+
+    # start scraping output, fill with default values
+    output = {
+        'name': name,
+        'homepage': webpage_url,
+        'list_url': 'https://cran.r-project.org/src/contrib/Archive/%s' % name,
+        'min_r_version': None,
+        'depends': [],
+        'imports': [],
+        'suggests': [],
+    }
+
+    # grab package url
+    url_re = re.compile('\.\./\.\./\.\./(src/contrib/%s.*\.tar\.gz)">' % name)
+    url_suffix = url_re.search(resp.text).group(1)
+
+    output['url'] = 'https://cran.r-project.org/' + url_suffix
+    output['short_desc'] = re.search('<h2>(.+)</h2>', resp.text, re.DOTALL).group(1).replace('\n', '')
+    output['long_desc'] = re.search('<p>(.+)</p>.*<table', resp.text, re.DOTALL).group(1).replace('  ','')
+    output['version'] = re.search('<td>Version:</td>\n<td>(.+)</td>', resp.text).group(1)
+    output['spack_name'] = get_spack_name_for(name)
+
+    # grab depends line
+    depends_line = re.search('<td>Depends:</td>\n<td>(.+)</td>', resp.text)
+
+    if depends_line != None:
+        depends_line = depends_line.group(1)
+
+        # search for minimum R verison
+        min_r_version_result = re.search('R \(&ge; ([^,]+)\)', depends_line)
+
+        if min_r_version_result != None:
+            output['min_r_version'] = min_r_version_result.group(1)
+
+        # search for CRAN dependencies
+        output['depends'].extend(parse_cran_links(depends_line))
+
+    # grab linkingto line
+    linkingto_line = re.search('<td>LinkingTo:</td>\n<td>(.+)</td>', resp.text)
+
+    if linkingto_line != None:
+        linkingto_line = linkingto_line.group(1)
+        output['depends'].extend(parse_cran_links(linkingto_line))
+
+    # grab imports line
+    imports_line = re.search('<td>Imports:</td>\n<td>(.+)</td>', resp.text)
+
+    if imports_line != None:
+        imports_line = imports_line.group(1)
+        output['imports'].extend(parse_cran_links(imports_line))
+
+    # grab suggests line
+    suggests_line = re.search('<td>Suggests:</td>\n<td>(.+)</td>', resp.text)
+
+    if suggests_line != None:
+        suggests_line = suggests_line.group(1)
+        output['suggests'].extend(parse_cran_links(suggests_line))
+
+    # grab homepage line
+    homepage_line = re.search('<td>URL:</td>\n<td><a href="([^"]+)">.+</td>', resp.text)
+
+    if homepage_line != None:
+        output['homepage'] = homepage_line.group(1)
+
+    return output
+
+parser = argparse.ArgumentParser(description='Generate spack packages from CRAN R packages')
+parser.add_argument('name', help='Name of CRAN package to generate')
+parser.add_argument('-n', '--no-imports', action='store_false', help="Don't consider Imports as dependencies")
+parser.add_argument('-s', '--suggests', action='store_true', help='Consider Suggests as dependencies')
+parser.add_argument('-r', '--recursive', action='store_true', help='Recursively generate dependencies')
+args = parser.parse_args()
+
+try:
+    build_spack_package_for(args.name, recursive=args.recursive, build_imports=~args.no_imports, build_suggests=args.suggests)
+except Exception as e:
+    print('Error occurred generating package for {0}: {1}'.format(args.name, e))
