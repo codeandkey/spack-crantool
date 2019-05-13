@@ -32,12 +32,10 @@ def gen_spack_boilerplate(package_data, use_imports=False, use_suggests=False):
     contents += 'class R%s(RPackage):\n' % package_data['name'].capitalize()
 
     # generate pretty-formatted desc
-    desc_lines = textwrap.wrap(package_data['short_desc'],
+    desc_lines = textwrap.wrap(package_data['short_desc'] + '"""',
                                76,
                                initial_indent = '"""',
                                subsequent_indent='   ')
-
-    desc_lines[-1] += '"""'
 
     for line in desc_lines:
         contents += '    %s\n' % line
