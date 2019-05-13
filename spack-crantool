@@ -45,18 +45,33 @@ def gen_spack_boilerplate(package_data, use_imports=False, use_suggests=False):
     contents += '    homepage = "%s"\n' % package_data['homepage']
     contents += '    url      = "%s"\n' % package_data['url']
     contents += '    list_url = "%s"\n\n' % package_data['list_url']
-    contents += "    version('{0}', sha256='{1}')\n\n".format(package_data['version'], checksum)
+    contents += "    version('{0}', sha256='{1}')\n".format(package_data['version'], checksum)
+
+    # we need to add en extra newline if there are any dependencies,
+    # but we do not want it to be there if there aren't any deps, as
+    # it will cause a flake8 fail
+    has_single_dep_flag = False
+    
+    def has_single_dep():
+        if has_single_dep_flag:
+            return
+        has_single_dep_flag = True
+        contents += '\n'
 
     def dep_line(depstr):
         return "    depends_on('{0}', type=('build', 'run'))\n".format(depstr)
 
     # inject r version constraint if needed
     if package_data['min_r_version'] != None:
+        has_single_dep()
         contents += dep_line('r@{0}:'.format(package_data['min_r_version']))
 
     # inject dependencies
     def inject_deps(deps):
         lines = ''
+
+        if len(deps) > 0:
+            has_single_dep()
 
         for dep in deps:
             dep_parts = dep.split('@')
