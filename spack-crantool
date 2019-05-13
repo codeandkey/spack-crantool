@@ -80,6 +80,7 @@ def gen_spack_boilerplate(package_data, use_imports=False, use_suggests=False):
 
     if len(deps) > 0:
         contents += '\n'
+        deps[1:] = sorted(deps[1:])
 
     for dep in deps:
         dep_parts = dep.split('@')
