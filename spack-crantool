@@ -50,44 +50,42 @@ def gen_spack_boilerplate(package_data, use_imports=False, use_suggests=False):
     # we need to add en extra newline if there are any dependencies,
     # but we do not want it to be there if there aren't any deps, as
     # it will cause a flake8 fail
-    has_single_dep_flag = False
+    hsd = False
     
-    def has_single_dep():
-        if has_single_dep_flag:
-            return
-        has_single_dep_flag = True
+    def has_single_dep(flag):
+        if flag:
+            return True
         contents += '\n'
+        return True
 
     def dep_line(depstr):
         return "    depends_on('{0}', type=('build', 'run'))\n".format(depstr)
 
-    # inject r version constraint if needed
+    # collect dependencies
+
+    deps = []
+
+    # collect r version constraint if needed
     if package_data['min_r_version'] != None:
-        has_single_dep()
-        contents += dep_line('r@{0}:'.format(package_data['min_r_version']))
+        deps.append('r@{0}:'.format(package_data['min_r_version']))
 
-    # inject dependencies
-    def inject_deps(deps):
-        lines = ''
-
-        if len(deps) > 0:
-            has_single_dep()
-
-        for dep in deps:
-            dep_parts = dep.split('@')
-            dep_parts[0] = get_spack_name_for(dep_parts[0])
-            dep = '@'.join(dep_parts)
-            lines += dep_line(dep)
-
-        return lines
-
-    contents += inject_deps(package_data['depends'])
+    # collect deps from flags
+    deps.extend(package_data['depends'])
 
     if use_imports:
-        contents += inject_deps(package_data['imports'])
+        deps.extend(package_data['imports'])
 
     if use_suggests:
-        contents += inject_deps(package_data['suggests'])
+        deps.extend(package_data['suggests'])
+
+    if len(deps) > 0:
+        contents += '\n'
+
+    for dep in deps:
+        dep_parts = dep.split('@')
+        dep_parts[0] = get_spack_name_for(dep_parts[0])
+        dep = '@'.join(dep_parts)
+        contents += dep_line(dep)
 
     # find the local spack installation
     pkg_root = '%s/../var/spack/repos/builtin/packages' % os.path.dirname(shutil.which('spack'))
@@ -147,6 +145,9 @@ def build_spack_package_for(name, recursive=False, build_imports=True, build_sug
 def get_spack_name_for(name):
     """Converts an R package name to the spack equivalent."""
     name = name.lower().replace('.', '-')
+
+    if name == 'r':
+        return name
 
     if not name.startswith('r-'):
         name = 'r-%s' % name
