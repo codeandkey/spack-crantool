@@ -78,9 +78,11 @@ def gen_spack_boilerplate(package_data, use_imports=False, use_suggests=False):
     if use_suggests:
         deps.extend(package_data['suggests'])
 
+    deps = list(set(deps))
+
     if len(deps) > 0:
         contents += '\n'
-        deps[1:] = sorted(deps[1:])
+        deps = sorted(deps, key = lambda x : get_spack_name_for(x.split('@')[0]))
 
     for dep in deps:
         dep_parts = dep.split('@')
