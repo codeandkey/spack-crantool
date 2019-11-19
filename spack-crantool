@@ -216,7 +216,7 @@ def fetch_cran_data(name):
        Note: this will ignore dependencies in bioconductor. if they are required then the
              generated package will NOT be able to build."""
 
-    webpage_url = 'https://cran.r-project.org/package=%s' % name
+    webpage_url = 'https://cloud.r-project.org/package=%s' % name
 
     print('fetching package data for {0} from {1} ..'.format(name, webpage_url))
 
@@ -233,7 +233,7 @@ def fetch_cran_data(name):
     output = {
         'name': name,
         'homepage': webpage_url,
-        'list_url': 'https://cran.r-project.org/src/contrib/Archive/%s' % name,
+        'list_url': 'https://cloud.r-project.org/src/contrib/Archive/%s' % name,
         'min_r_version': None,
         'depends': [],
         'imports': [],
@@ -244,7 +244,7 @@ def fetch_cran_data(name):
     url_re = re.compile('\.\./\.\./\.\./(src/contrib/%s.*\.tar\.gz)">' % name)
     url_suffix = url_re.search(resp.text).group(1)
 
-    output['url'] = 'https://cran.r-project.org/' + url_suffix
+    output['url'] = 'https://cloud.r-project.org/' + url_suffix
     output['short_desc'] = re.search('<h2>(.+)</h2>', resp.text, re.DOTALL).group(1).replace('\n', '')
     output['long_desc'] = re.search('<p>(.+)</p>.*<table', resp.text, re.DOTALL).group(1).replace('  ','')
     output['version'] = re.search('<td>Version:</td>\n<td>(.+)</td>', resp.text).group(1)
